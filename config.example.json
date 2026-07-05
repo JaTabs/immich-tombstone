@@ -1,0 +1,8 @@
+{
+  "api_url": "http://127.0.0.1:2283",
+  "api_key": "YOUR_IMMICH_API_KEY",
+  "mode": "tombstone",
+  "media_root": "/path/to/immich/upload-location",
+  "media_prefix": "/data",
+  "ntfy_url": ""
+}

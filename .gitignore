@@ -1,0 +1,7 @@
+config.json
+blocklist.tsv
+tombstones.tsv
+state.json
+tombstone.log
+*.tmp
+__pycache__/
