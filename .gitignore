@@ -1,7 +1,19 @@
-config.json
-blocklist.tsv
-tombstones.tsv
-state.json
-tombstone.log
+# Configuración, estado y backups privados; solo el ejemplo se publica.
+*.json
+!config.example.json
+*.tsv
+*.log
+*.log.*
+*.dump
+*.sql
+*.sql.gz
+*.db
+*.db-*
+*.bak
+.env*
+backups/
+.run.lock
+.state-*
+.config.json-*
 *.tmp
 __pycache__/

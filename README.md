@@ -1,44 +1,34 @@
 # immich-tombstone
 
-Stop [Immich](https://immich.app) from re-uploading photos you permanently deleted.
+Keep checksums of photos you intentionally delete from [Immich](https://immich.app), so a later phone backup does not keep bringing them back.
 
-> ⚠️ **Read the [warnings](#%EF%B8%8F-warnings--disclaimer) before using this.** This tool intentionally destroys file contents. The code is AI-generated. Use at your own risk.
+[Español](README.es.md) · [Changes and upgrade notes](CHANGELOG.md) · [Security](SECURITY.md)
 
-*¿Español? Lee el [README.es.md](README.es.md).*
+**Start with `archive` mode.** It keeps complete files. `tombstone` mode deliberately and irreversibly empties originals and known video transcodes, keeping previews. It requires explicit consent and working backups of both your library and database. There is no warranty against data loss. This project is AI-assisted and is not affiliated with Immich.
 
-## The problem
+## How it works
 
-When you permanently delete a photo in Immich (emptying the trash, or after the 30-day trash period), the server erases **every record** of the asset — including its SHA1 checksum. On its next backup cycle, the mobile app compares your phone's library against the server, doesn't find the photo, and **uploads it again**. Delete it again, it comes back again. Forever, as long as the photo exists on your phone.
+1. Capture checksums from **your own internal assets** in the trash. External libraries and partners are excluded.
+2. If a purged file is uploaded again, archive the new asset. Keeping its database record makes Immich's upload preflight report a duplicate.
+3. In `tombstone` mode only, verify the original's SHA1 and the asset's current identity and visibility, then truncate the original and exact known transcode paths. Keep thumbnails and previews.
+4. Unarchive an asset to undo the block. In `archive` mode its original is already intact. In `tombstone` mode an empty husk can be removed so the phone can upload again; asynchronous deletion is tracked until upload preflight confirms recovery. Empty Live Photos and edited assets require manual recovery rather than risking linked files.
 
-This has been an open request since 2023 ([discussion #4282](https://github.com/immich-app/immich/discussions/4282), see also [#23897](https://github.com/immich-app/immich/issues/23897), [#22507](https://github.com/immich-app/immich/discussions/22507)). There is no native fix. On Android there is an experimental *Sync Remote Deletions* option (which deletes the photo from your phone); on iOS there is nothing.
+This is a reactive workaround for the deleted-checksum problem discussed in [Immich #4282](https://github.com/immich-app/immich/discussions/4282), not an upload-blocking plugin or a promise that Immich will never change its API.
 
-## How this works
-
-A small zero-dependency Python script runs from cron and keeps a **blocklist of checksums**:
-
-1. **Capture** — every asset sitting in the trash gets its SHA1 checksum recorded. Deleting to trash = "I don't want this on the server".
-2. **Control** — when an active asset appears whose checksum is blocklisted (= the app re-uploaded it), the script turns it into a **tombstone**:
-   - The asset is **archived** (`visibility: archive`): it disappears from the timeline, but its checksum **stays in the database**. The app's pre-upload check now answers `duplicate` — **it stops re-uploading that file forever**.
-   - The original file (and the transcoded video, usually the biggest offender) is **truncated to 0 bytes** on disk. The already-generated thumbnails are kept, so the tombstone is still recognizable in the Archive view at preview quality while using almost no space.
-3. **Recovery** — want a photo back? Un-archive it in the Immich UI. The script unblocks the checksum and deletes the empty husk; your phone re-uploads the full-quality version on its next backup.
-4. Restoring a photo from the trash (before purging) also unblocks it — the script only ever touches checksums that went through the trash.
-
-Why truncation works: Immich computes the checksum **once, at upload time**, and never re-verifies file contents. Truncating instead of deleting keeps the *Repair* page free of missing-file warnings.
-
-### Modes
-
-| mode (config) | re-upload loop stops | disk space freed | needs filesystem access |
+| Mode | Retains checksum | Original files | Filesystem access |
 |---|---|---|---|
-| `tombstone` (default) | ✅ | ✅ (thumbnails remain, ~150 KB/photo) | ✅ runs on the host that stores the media |
-| `archive` | ✅ | ❌ (full files remain, hidden in Archive) | ❌ API only, runs anywhere |
-| `delete` | ❌ (infinite loop) | ✅ | ❌ API only |
+| `archive` — default | Yes, while the archived record exists | Preserved | Not required |
+| `tombstone` — explicit opt-in | Yes, while the archived record exists | Truncated; previews kept | Required |
+
+The old `delete` mode has been removed: deleting the checksum again recreates the upload loop.
 
 ## Requirements
 
-- Immich **v3** (tested on v3.0.1; needs the `visibility` field and the `trashedAfter` search filter)
-- `python3` (any recent version, standard library only) and cron on the machine that runs the script
-- For `tombstone` mode: run it on the machine that has direct access to Immich's `UPLOAD_LOCATION` (the Docker host, or a host mounting it via NFS/SMB)
-- An Immich **API key** for your user (Account Settings → API Keys) with asset read/update/delete and search permissions (or full access)
+- Linux, Python 3.10 or newer, and cron for scheduled operation. No pip dependencies and no need for Docker socket access.
+- Immich v3. Read-only API checks have been exercised against v3.0.1 and v3.3.3; future versions and custom layouts still need validation. The installer rejects other major versions.
+- A dedicated API key belonging to **the user whose assets you manage**, not a partner's key. It needs current-user read, metadata search, and asset read/update permissions. `tombstone` also needs asset delete and upload-preflight permissions. A full-permission key for that user is the simplest setup, but broader than necessary; use granular permissions when available. Never put the key in Git, shell command arguments, or issue reports.
+- A reachable base URL, such as `http://127.0.0.1:2283` or your own HTTPS URL. Authentication proxies that redirect to a login page will not work: API redirects are rejected to protect the key. TLS verification stays enabled.
+- For `tombstone`: direct, writable access to the real `UPLOAD_LOCATION`, using the standard `library/`, `upload/`, and `encoded-video/` layout. Symlinks and hardlinks are intentionally rejected. The execution account must have the necessary filesystem permissions; root is not otherwise required.
 
 ## Install
 
@@ -48,40 +38,84 @@ cd immich-tombstone
 sudo ./install.sh
 ```
 
-The installer asks for everything (API URL, key, mode, paths), validates API access, and sets up a cron job (default: every 15 minutes). Unattended install is possible via `IT_*` environment variables — see the header of [`install.sh`](install.sh).
+The installer asks for the URL and a hidden API key, discovers and pins the owner ID, validates the API and a **dry-run**, then installs a cron job **every minute**. Default installation directory: `/opt/immich-tombstone`. Default mode: `archive`.
 
-Manual install: copy `immich_tombstone.py` somewhere, create a `config.json` next to it (see [`config.example.json`](config.example.json), `chmod 600`), and add a cron line:
+For an unprivileged API-only installation:
 
+```bash
+IT_DIR="$HOME/.local/share/immich-tombstone" ./install.sh
 ```
-*/15 * * * * /usr/bin/python3 /opt/immich-tombstone/immich_tombstone.py >/dev/null 2>&1
+
+The shell entry point delegates to `install.py`, which uses only Python's standard library. Do not install from a pipe. Read the code first.
+
+### Unattended settings
+
+Pass secrets using an existing protected environment or secret manager, not a literal key in shell history. Do not run the installer with shell tracing enabled.
+
+| Variable | Default / meaning |
+|---|---|
+| `IT_DIR` | `/opt/immich-tombstone` |
+| `IT_API_URL` | Required for a new installation; base URL without `/api` |
+| `IT_API_KEY` | Required for a new installation; kept out of process arguments and output |
+| `IT_MODE` | `archive` or `tombstone`; default `archive` |
+| `IT_ALLOW_TRUNCATE` | `1` explicitly permits truncation; required for unattended `tombstone` setup |
+| `IT_MEDIA_ROOT` | Host path to `UPLOAD_LOCATION`; required for `tombstone` |
+| `IT_MEDIA_PREFIX` | Container/API path prefix; default `/data` |
+| `IT_NTFY_URL` | Optional notification topic URL; empty disables it |
+| `IT_CRON_MINUTES` | `1`; accepts 1–59 and uses cron's `*/N` minute field |
+| `IT_NO_CRON` | `1` leaves crontab unchanged |
+
+An existing configuration is reused unless you override its values. **Pause existing jobs and wait for active runs before upgrading**; the installer refuses an active cron entry for the same installation. It backs up code, configuration, and state under its private `backups/` directory before replacing files. A failed validation does not enable a new cron job; inspect the private backup before manually reverting.
+
+### Manual configuration and dry-run
+
+Copy [`config.example.json`](config.example.json) into a private installation directory, edit it, and set permissions before running:
+
+```bash
+chmod 700 /path/to/private-installation
+chmod 600 /path/to/private-installation/config.json
+python3 -I immich_tombstone.py /path/to/private-installation/config.json --dry-run
 ```
 
-**Multiple Immich users**: the API key scopes everything to one user. Create one config file per user and pass its path as the first argument: `immich_tombstone.py /etc/immich-tombstone/alice.json` (state files live next to each config).
+Use real paths in place of the placeholders. The config and its directory must belong to the execution account; the directory must not be group/world-writable. A dry-run performs API reads and file checks but no API mutations, state/log writes, notifications, or truncation. It may create a private lock file.
 
-## Day-to-day
+`owner_id` can be empty in a new manual configuration: it is discovered from the key, then pinned in the first successful state snapshot. Subsequent runs reject an account mismatch. The installer also writes the discovered ID into its private config.
 
-- Delete photos normally (trash → empty trash, or let the 30 days pass). Nothing else to do — re-uploads become tombstones within one cron interval.
-- Tombstones live in the **Archive** view. To *really* recover one, un-archive it and wait for the next phone backup.
-- The log (`tombstone.log`, next to the config) tells you everything: `BLOCKED`, `TOMBSTONED`, `UNBLOCKED`, plus a per-run `OK` summary line.
-- Optional [ntfy](https://ntfy.sh) notifications when something is tombstoned or revived.
+For a default layout, `media_prefix: "/data"` maps `/data/library/...` from the API to `media_root/library/...` on your host. A custom prefix is supported with a directory-boundary check. Arbitrary external-library paths are not supported.
 
-## Caveats and limitations
+Choose the mode before the first normal run. Only after reviewing a dry-run and testing with a **disposable** photo should you enable `tombstone` with both `"mode": "tombstone"` and `"allow_truncate": true`. If you already have an `archive` state, do not simply change that field: pause and keep the old installation, then use a different private directory for the new mode. It starts with the current trash and does not retroactively truncate every previously archived file. The installer creates a quoted, one-minute cron entry; API credentials are never part of it.
 
-- **Blind window**: if you trash *and* purge a photo within one cron interval (default 15 min), its checksum is never captured and that photo will keep re-uploading. Empty the trash at least 15 minutes after deleting, or lower the interval.
-- Re-uploads are visible in the timeline for up to one cron interval before being tombstoned (the approach is reactive — nothing can reject the upload itself server-side).
-- Tombstoned **videos** won't play (only their thumbnail survives). Photos remain viewable at preview quality.
-- Assumes Immich's standard storage layout (`library/`, `encoded-video/`, `thumbs/` under `UPLOAD_LOCATION`).
-- The script talks to undocumented-ish API surface (`search/metadata` quirks change between majors — e.g. v3 silently ignores `isTrashed`). A future Immich version may need adjustments.
-- If Immich ever gains a native deleted-assets registry, use that instead of this.
+**Multiple users:** use a separate private directory, config, state, and cron entry for each user. Two configs in the same directory are not isolated. Do not reuse state with another user or silently switch an existing state between modes.
 
-## ⚠️ Warnings / disclaimer
+## Operation and recovery
 
-- **This tool permanently and irreversibly destroys the content of files it tombstones.** That is its purpose. If it misidentifies an asset (bug, API change, race condition), that photo's full-quality content is **gone** unless it still exists on a phone or backup.
-- **The author is not responsible for any data loss.** No warranty of any kind. Use with caution, at your own risk, and only if you understand what it does. Test it with a throwaway photo first (upload → trash → empty trash → let it re-upload → watch the log).
-- **This code was generated by an AI** (Claude) under human direction and tested against a single real-world instance (Immich v3.0.1, ~15k assets). Review it before running it — it's ~250 lines of straightforward Python.
-- Keep **backups** of your Immich library and database. You should be doing this anyway.
-- Not affiliated with or endorsed by the Immich project.
+- Delete to trash normally. Wait for a successful capture before purging; check `tombstone.log` for `OK`. New filenames and checksums stay in your private state, not in notification messages.
+- A nonblocking `flock` prevents overlaps. If one execution is slow, the next skips rather than starting a second writer.
+- Recent updates are searched with a five-minute overlap. A full reconciliation runs daily, including old tombstones and late transcodes. The full trash scan is retained to avoid relying on unverified trash-update timestamps.
+- `state.json` is an atomic, owner/mode-bound snapshot. Pending operations are saved before remote mutations; a lost response is not blindly treated as success. HTTP 400 may mean missing **or inaccessible**, so it does not prove deletion.
+- Unarchiving requests recovery. If the phone checked for duplicates while Immich was still deleting the husk, restart its backup after the pending operation completes. This script cannot undo a duplicate response the phone already received.
+- Errors go to `tombstone.log`; the installed cron also captures startup errors in private `cron-errors.log`. Optional ntfy messages contain counts, not filenames or checksums. Manage log retention according to your environment.
+
+For existing installations, read [the migration instructions](CHANGELOG.md#upgrading-from-the-original-version). Old TSV entries without provable ownership are retained in quarantine, not allowed to truncate files. Capturing a later, verified trash event can re-establish the block.
+
+## Limits and safety
+
+- Trashing and purging between captures is still a blind window. One minute reduces it; API outages and long runs can extend it.
+- This does not intercept uploads. A re-upload can appear until the next successful run.
+- Tombstoned videos will not play; thumbnails do not replace the original. Do not regenerate all thumbnails from zero-byte originals.
+- The API and filesystem do not share a transaction. Revalidation, SHA1, regular-file/link checks, and descriptor-based path resolution reduce risk; they cannot eliminate races with Immich or an administrator modifying files concurrently.
+- A crash after a remote operation or an ambiguous permission error can require manual intervention. Keep state backups and inspect the pending record; do not delete state to suppress an error.
+- Keep originals and database backups independently. This tool is not a backup, cannot reconstruct truncated originals, and does not make the original authors responsible for data loss.
+
+## Tests
+
+```bash
+python3 -I -W error::ResourceWarning -m unittest discover -s . -p 'test_*.py'
+sh -n install.sh
+```
+
+Tests use synthetic data, temporary files, a local fake API, and an isolated fake crontab. They do not connect to a real Immich installation or require real credentials. CI runs them with multiple Python versions. A passing suite is not a guarantee that a future Immich release is compatible.
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE).
